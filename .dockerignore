@@ -1,0 +1,8 @@
+.gitignore
+.trellis/
+.claude/
+*.pyc
+__pycache__/
+*.egg-info/
+daemon.pid
+logs/

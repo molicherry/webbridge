@@ -1,0 +1,41 @@
+# kimi-webbridge daemon
+daemon.pid
+logs/
+identity.json
+bin/
+
+# Trellis developer-local files (workspace journals are personal)
+.trellis/workspace/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+chrome-data/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets & environment
+.env
+.env.local
+*.pem
+*.key

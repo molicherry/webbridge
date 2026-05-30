@@ -1,0 +1,3 @@
+{"file": "prd.md", "reason": "Acceptance criteria checklist: 12 tools, auth, session, persistence, self-healing"}
+{"file": "research/mcp-server-patterns.md", "reason": "Verify MCP tool contract compliance, transport mode, auth pattern correctness"}
+{"file": "research/docker-browser-automation.md", "reason": "Verify Chrome flags, extension loading, volume mount, security isolation"}

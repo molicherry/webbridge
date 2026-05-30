@@ -1,0 +1,28 @@
+services:
+  kimi-webbridge-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kimi-webbridge-mcp:latest
+    container_name: kimi-webbridge-mcp
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    environment:
+      - MCP_API_KEY=${MCP_API_KEY:?MCP_API_KEY must be set}
+      - MCP_PORT=8000
+      - CDP_PORT=9222
+      - DAEMON_PORT=10086
+    volumes:
+      - chrome-data:/home/chrome/data
+    shm_size: "2gb"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  chrome-data:
+    driver: local
