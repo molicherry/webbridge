@@ -40,5 +40,5 @@ desktop.ini
 *.pem
 *.key
 
-# Deployment-specific (local only)
+# Deployment-specific
 docker-compose.portainer.yml
