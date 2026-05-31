@@ -4,7 +4,7 @@ volumes:
 
 services:
   kimi-webbridge-mcp:
-    image: ghcr.io/molicherry/webbridge:v0.0.1
+    image: ghcr.io/molicherry/webbridge:latest
     container_name: kimi-webbridge-mcp
     ports:
       - "${MCP_PORT:-8000}:8000"
