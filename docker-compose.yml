@@ -4,10 +4,7 @@ volumes:
 
 services:
   kimi-webbridge-mcp:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: kimi-webbridge-mcp:latest
+    image: ghcr.io/molicherry/webbridge:v0.0.1
     container_name: kimi-webbridge-mcp
     ports:
       - "${MCP_PORT:-8000}:8000"
