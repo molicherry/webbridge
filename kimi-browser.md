@@ -19,8 +19,10 @@ For any web interaction task, follow this pattern:
 2. snapshot(session_id="my-task")        → get accessibility tree with @e refs
 3. click / fill / mouse_click            → interact using @e refs from snapshot
 4. screenshot(session_id="my-task")      → visually verify (optional)
-5. close_session / close_tab             → clean up when done
+5. close_session("my-task")              → **REQUIRED: clean up when done**
 ```
+
+**Always close sessions.** Tabs are never auto-closed — if you skip `close_session`, tabs accumulate indefinitely, wasting memory.
 
 ### Session Isolation
 

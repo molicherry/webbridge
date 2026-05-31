@@ -302,6 +302,6 @@ TOOL_REGISTRY = [
     (upload, "Upload files via a file input element."),
     (save_as_pdf, "Save the current page as PDF. Returns base64-encoded data."),
     (list_tabs, "List all open tabs in the session."),
-    (close_tab, "Close the current tab."),
-    (close_session, "Close all tabs in the session."),
+    (close_tab, "Close the current tab. Always close tabs when done to free resources."),
+    (close_session, "Close all tabs in the session. Always call this when a task completes — tabs are not auto-closed."),
 ]
