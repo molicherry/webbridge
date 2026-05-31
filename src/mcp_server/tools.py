@@ -108,6 +108,60 @@ async def fill(selector: str, value: str, session_id: str = "") -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
+async def mouse_click(selector: str, session_id: str = "") -> str:
+    """Click an element using CDP-level mouse events (more reliable than DOM click).
+    Handles edge cases like display:none, detached elements, or shadow DOM.
+
+    Args:
+        selector: The @e ref (e.g. @e123) or CSS selector of the element to click.
+        session_id: Session ID for tab group isolation. Auto-generated if empty.
+    """
+    data = await _call("mouse_click", {"selector": selector}, session_id or None)
+    return json.dumps(data, ensure_ascii=False)
+
+
+async def cdp(method: str, params: str = "{}", session_id: str = "") -> str:
+    """Execute a raw Chrome DevTools Protocol command. Full access to CDP.
+    Use when no other tool can do what you need.
+
+    Args:
+        method: CDP method name (e.g. "Page.captureScreenshot", "Input.dispatchMouseEvent").
+        params: JSON string of CDP params (e.g. '{"format":"png"}').
+        session_id: Session ID for tab group isolation. Auto-generated if empty.
+    """
+    import json as _json
+    data = await _call("cdp", {"method": method, "params": _json.loads(params)}, session_id or None)
+    return _json.dumps(data, ensure_ascii=False)
+
+
+async def key_type(text: str, session_id: str = "") -> str:
+    """Insert text directly into the current input focus via Input.insertText.
+    Unlike fill(), this types at the cursor position rather than replacing content.
+
+    Args:
+        text: The text to type.
+        session_id: Session ID for tab group isolation. Auto-generated if empty.
+    """
+    data = await _call("key_type", {"text": text}, session_id or None)
+    return json.dumps(data, ensure_ascii=False)
+
+
+async def send_keys(keys: str, repeat: int = 1, session_id: str = "") -> str:
+    """Send keyboard key events. Supports modifiers (Alt/Ctrl/Cmd/Shift/Meta),
+    function keys (F1-F12), named keys (Enter, Escape, Tab, Backspace, etc.),
+    and single characters. The 'Mod' modifier auto-resolves to Cmd on Mac or Ctrl on others.
+
+    Examples: "Enter", "Mod+A", "Shift+Tab", "Ctrl+F5", "Enter Escape", "PageDown"
+
+    Args:
+        keys: Keys string. Use '+' for combos, space to separate multiple keys.
+        repeat: Number of times to repeat the key sequence. Default 1, max 100.
+        session_id: Session ID for tab group isolation. Auto-generated if empty.
+    """
+    data = await _call("send_keys", {"keys": keys, "repeat": repeat}, session_id or None)
+    return json.dumps(data, ensure_ascii=False)
+
+
 async def screenshot(format: str = "png", quality: int = 80, selector: str = "", session_id: str = "") -> str:
     """Take a screenshot of the current page or a specific element.
     Returns base64-encoded image data.
@@ -237,9 +291,13 @@ TOOL_REGISTRY = [
     (find_tab, "Find an already-open tab by URL or active state. Use before navigate if reusing tabs."),
     (snapshot, "Get the accessibility tree of the current page with @e refs for interactive elements."),
     (click, "Click an element by @e ref (from snapshot) or CSS selector."),
+    (mouse_click, "Click with CDP-level mouse events. More reliable for edge cases than DOM click."),
     (fill, "Fill text into input, textarea, or contenteditable fields. Replaces existing content."),
+    (key_type, "Insert text at cursor position. Unlike fill(), types rather than replaces."),
+    (send_keys, "Send keyboard events with modifiers. E.g. 'Mod+A', 'Enter', 'Ctrl+F5'."),
     (screenshot, "Take a screenshot. Returns base64 image data. Use for visual verification."),
     (evaluate, "Execute JavaScript in the page. Supports async/await. Use when snapshot/click/fill can't reach."),
+    (cdp, "Execute a raw Chrome DevTools Protocol command. For advanced browser control."),
     (network, "Monitor network requests. Use url_filter to capture specific URLs."),
     (upload, "Upload files via a file input element."),
     (save_as_pdf, "Save the current page as PDF. Returns base64-encoded data."),

@@ -7,6 +7,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("kimi-webbridge-mcp")
 
 from fastmcp import FastMCP
+from starlette.responses import JSONResponse
 
 from .auth import APIKeyMiddleware, get_api_key
 from .tools import TOOL_REGISTRY
@@ -25,7 +26,7 @@ for handler, description in TOOL_REGISTRY:
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request):
-    return {"status": "ok", "server": SERVER_NAME, "version": SERVER_VERSION}
+    return JSONResponse({"status": "ok", "server": SERVER_NAME, "version": SERVER_VERSION})
 
 
 def main():

@@ -1,0 +1,77 @@
+name: Docker Build & Verify
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: kimi-webbridge-mcp:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start container
+        run: |
+          docker run -d \
+            --name kimi-webbridge-ci \
+            --shm-size=2gb \
+            -e MCP_API_KEY=ci-test-key \
+            -p 8000:8000 \
+            kimi-webbridge-mcp:ci
+          echo "Container started, waiting for it to be ready..."
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 120); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' kimi-webbridge-ci 2>/dev/null || echo "starting")
+            echo "[$i] Container status: $status"
+            if [ "$status" = "healthy" ]; then
+              echo "Container is healthy!"
+              exit 0
+            fi
+            if [ "$status" = "unhealthy" ]; then
+              echo "Container is unhealthy — dumping logs:"
+              docker logs kimi-webbridge-ci --tail 50
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "Timeout waiting for container to become healthy"
+          docker logs kimi-webbridge-ci --tail 50
+          exit 1
+
+      - name: Verify MCP health endpoint
+        run: |
+          response=$(curl -sf http://localhost:8000/health)
+          echo "Health response: $response"
+          echo "$response" | grep -q '"status":"ok"'
+
+      - name: Verify daemon status
+        run: |
+          response=$(docker exec kimi-webbridge-ci curl -sf http://127.0.0.1:10086/status)
+          echo "Daemon status: $response"
+          echo "$response" | grep -q '"running":true'
+          echo "$response" | grep -q '"extension_connected":true'
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop kimi-webbridge-ci 2>/dev/null || true
+          docker rm kimi-webbridge-ci 2>/dev/null || true
