@@ -4,8 +4,8 @@ logs/
 identity.json
 bin/
 
-# Trellis developer-local files (workspace journals are personal)
-.trellis/workspace/
+# Trellis (local only, not needed in repo)
+.trellis/
 
 # Python
 __pycache__/
@@ -39,3 +39,6 @@ desktop.ini
 .env.local
 *.pem
 *.key
+
+# Deployment-specific (local only)
+docker-compose.portainer.yml

@@ -1,3 +1,0 @@
-{"file": "prd.md", "reason": "Full requirements, technical approach, architecture diagram, acceptance criteria"}
-{"file": "research/mcp-server-patterns.md", "reason": "FastMCP SDK patterns, tool definition examples, auth middleware, transport config"}
-{"file": "research/docker-browser-automation.md", "reason": "Dockerfile template, Chrome flags, extension loading, volume persistence"}
