@@ -15,20 +15,54 @@ Docker Container
 
 ## 快速开始
 
-```bash
-# 1. 设置 API Key
-export MCP_API_KEY="your-secret-key-here"
+### 方式一：直接拉镜像（推荐）
 
-# 2. 构建并启动
-docker compose up -d --build
+```bash
+# 1. 创建 docker-compose.yml（替换 <版本> 为具体版本号或 latest）
+cat > docker-compose.yml << 'EOF'
+volumes:
+  chrome-data:
+    driver: local
+
+services:
+  kimi-webbridge-mcp:
+    image: ghcr.io/molicherry/webbridge:latest
+    container_name: kimi-webbridge-mcp
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    environment:
+      - MCP_API_KEY=${MCP_API_KEY:?MCP_API_KEY must be set}
+      - MCP_PORT=8000
+    volumes:
+      - chrome-data:/home/chrome/data
+    shm_size: "2gb"
+    restart: unless-stopped
+EOF
+
+# 2. 设置 API Key 并启动
+export MCP_API_KEY="your-secret-key-here"
+docker compose up -d
 
 # 3. 等待就绪（约 30-60 秒首次启动）
 curl http://localhost:8000/health
 # → {"status": "ok", "server": "kimi-webbridge-mcp", "version": "1.0.0"}
+```
 
-# 4. 验证扩展连接
-docker exec kimi-webbridge-mcp curl -s http://127.0.0.1:10086/status
-# → {"extension_connected": true, "extension_id": "hinhmbb...", "extension_version": "1.9.14", "running": true}
+### 方式二：从源码构建
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/molicherry/webbridge.git
+cd webbridge
+
+# 2. 设置 API Key
+export MCP_API_KEY="your-secret-key-here"
+
+# 3. 构建并启动
+docker compose up -d --build
+
+# 4. 等待就绪
+curl http://localhost:8000/health
 ```
 
 ## 配置
@@ -175,8 +209,13 @@ networks:
 
 ## CI 验证
 
-项目包含 GitHub Actions CI（`.github/workflows/docker-build.yml`），每次 push 自动：
-- 构建 Docker 镜像
-- 启动容器并等待 healthy
-- 验证 `/health` 端点
-- 验证 daemon `extension_connected: true`
+项目包含两个 GitHub Actions workflow：
+
+| Workflow | 触发条件 | 作用 |
+|----------|----------|------|
+| `docker-build.yml` | push / PR to master/main | 构建镜像 → 启动容器 → 验证 daemon 连接 |
+| `docker-publish.yml` | push `v*` tag | 构建并推送镜像到 `ghcr.io/molicherry/webbridge` |
+
+发布的镜像标签：
+- `v1.0.0` — Git tag
+- `latest` — 最新 tag
