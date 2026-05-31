@@ -79,7 +79,9 @@ curl http://localhost:8000/health
 
 ### Claude Code
 
-在项目根目录或 `~/.claude/settings.json` 中添加 MCP server：
+**1. 配置 MCP Server**
+
+在项目根目录或 `~/.claude/settings.json` 中添加：
 
 ```json
 {
@@ -95,12 +97,24 @@ curl http://localhost:8000/health
 }
 ```
 
-同时加载 `kimi-browser.md` skill 文件以获得最佳浏览器操控体验：
+**2. 加载 Skill 文件**
+
+`kimi-browser.md` 是一个 Claude Code Skill，告诉 AI 如何正确使用浏览器的 17 个工具。加载后 AI 会自动遵循其中的工作流和最佳实践。
 
 ```bash
-# 复制 skill 到项目
+# 下载 skill 文件
+curl -O https://raw.githubusercontent.com/molicherry/webbridge/master/kimi-browser.md
+
+# 方式 A：放到当前项目的 .claude/skills/ 目录（仅该项目生效）
+mkdir -p .claude/skills/
 cp kimi-browser.md .claude/skills/
+
+# 方式 B：放到全局 ~/.claude/skills/ 目录（所有项目生效）
+mkdir -p ~/.claude/skills/
+cp kimi-browser.md ~/.claude/skills/
 ```
+
+Skill 文件内容详解见 [kimi-browser.md](kimi-browser.md)。
 
 ### Claude Desktop
 
@@ -206,12 +220,3 @@ networks:
   proxy:
     external: true
 ```
-
-## CI 验证
-
-项目包含两个 GitHub Actions workflow：
-
-| Workflow | 触发条件 | 作用 |
-|----------|----------|------|
-| `docker-build.yml` | push / PR to master/main | 构建镜像 → 启动容器 → 验证 daemon 连接 |
-| `docker-publish.yml` | push `v*` tag | 构建并推送镜像到 ghcr.io |
