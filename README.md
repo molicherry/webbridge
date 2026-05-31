@@ -214,8 +214,4 @@ networks:
 | Workflow | 触发条件 | 作用 |
 |----------|----------|------|
 | `docker-build.yml` | push / PR to master/main | 构建镜像 → 启动容器 → 验证 daemon 连接 |
-| `docker-publish.yml` | push `v*` tag | 构建并推送镜像到 `ghcr.io/molicherry/webbridge` |
-
-发布的镜像标签：
-- `v1.0.0` — Git tag
-- `latest` — 最新 tag
+| `docker-publish.yml` | push `v*` tag | 构建并推送镜像到 ghcr.io |
