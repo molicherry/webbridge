@@ -2,10 +2,21 @@
 
 import base64
 import json
+import logging
 import os
+import time as _time
 from typing import Any
 
 import httpx
+
+from . import call_logger
+
+_log = logging.getLogger("kimi-webbridge-mcp.tools")
+
+_SENSITIVE_PARAM_KEYS = frozenset({
+    "url", "value", "text", "code", "keys", "params", "files", "selector",
+    "password", "token", "secret", "key", "api_key", "authorization",
+})
 
 DAEMON_URL = os.environ.get("DAEMON_URL", "http://127.0.0.1:10086")
 _client: httpx.AsyncClient | None = None
@@ -18,16 +29,80 @@ def get_client() -> httpx.AsyncClient:
     return _client
 
 
+def _sanitize_params(args: dict[str, Any] | None) -> dict[str, Any]:
+    """Return a safe version of args for logging: keys preserved, values replaced by type indicators."""
+    if not args:
+        return {}
+    sanitized: dict[str, Any] = {}
+    for k, v in args.items():
+        if k in _SENSITIVE_PARAM_KEYS:
+            sanitized[k] = f"<{type(v).__name__}>"
+        elif isinstance(v, (str, int, float, bool)):
+            sanitized[k] = v
+        elif isinstance(v, (list, tuple)):
+            sanitized[k] = f"<{type(v).__name__}[{len(v)}]>"
+        elif isinstance(v, dict):
+            sanitized[k] = f"<dict[{len(v)}]>"
+        else:
+            sanitized[k] = f"<{type(v).__name__}>"
+    return sanitized
+
+
 async def _call(action: str, args: dict[str, Any] | None = None, session_id: str | None = None) -> dict[str, Any]:
     body: dict[str, Any] = {"action": action, "args": args or {}}
     if session_id:
         body["session"] = session_id
-    resp = await get_client().post("/command", json=body)
-    resp.raise_for_status()
-    data: dict[str, Any] = resp.json()
-    if "error" in data or data.get("success") is False:
-        raise RuntimeError(f"kimi-webbridge error: {data}")
-    return data
+
+    source = call_logger.request_source.get()
+    client_ip = call_logger.request_client_ip.get()
+    user_agent = call_logger.request_user_agent.get()
+    safe_params = _sanitize_params(args)
+
+    start = _time.monotonic()
+    try:
+        resp = await get_client().post("/command", json=body)
+        resp.raise_for_status()
+        data: dict[str, Any] = resp.json()
+        if "error" in data or data.get("success") is False:
+            duration_ms = int((_time.monotonic() - start) * 1000)
+            error_msg = json.dumps(data, ensure_ascii=False)
+            call_logger.log_call(
+                source=source,
+                method=action,
+                params=safe_params,
+                result_status="error",
+                duration_ms=duration_ms,
+                client_ip=client_ip,
+                user_agent=user_agent,
+                error_msg=error_msg,
+            )
+            raise RuntimeError(f"kimi-webbridge error: {data}")
+        duration_ms = int((_time.monotonic() - start) * 1000)
+        call_logger.log_call(
+            source=source,
+            method=action,
+            params=safe_params,
+            result_status="success",
+            duration_ms=duration_ms,
+            client_ip=client_ip,
+            user_agent=user_agent,
+        )
+        return data
+    except RuntimeError:
+        raise
+    except Exception as e:
+        duration_ms = int((_time.monotonic() - start) * 1000)
+        call_logger.log_call(
+            source=source,
+            method=action,
+            params=safe_params,
+            result_status="error",
+            duration_ms=duration_ms,
+            client_ip=client_ip,
+            user_agent=user_agent,
+            error_msg=str(e),
+        )
+        raise
 
 
 def _read_file_b64(path: str) -> str:

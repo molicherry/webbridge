@@ -18,6 +18,9 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         if request.method == "GET" and request.url.path == "/health":
             return await call_next(request)
 
+        if request.url.path.startswith("/admin"):
+            return await call_next(request)
+
         key = request.headers.get("X-API-Key", "")
         if not secrets.compare_digest(key, self.api_key):
             return JSONResponse(

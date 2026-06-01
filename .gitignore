@@ -40,5 +40,8 @@ desktop.ini
 *.pem
 *.key
 
+# Internal tooling
+.sisyphus/
+
 # Deployment-specific
 docker-compose.portainer.yml

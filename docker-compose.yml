@@ -13,6 +13,10 @@ services:
       - MCP_PORT=8000
       - CDP_PORT=9222
       - DAEMON_PORT=10086
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - ADMIN_SESSION_SECRET=${ADMIN_SESSION_SECRET:-}
+      - EXTERNAL_API_KEY=${EXTERNAL_API_KEY:-}
+      - DB_PATH=/home/chrome/data/call_records.db
     volumes:
       - chrome-data:/home/chrome/data
     shm_size: "2gb"

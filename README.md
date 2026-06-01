@@ -9,7 +9,9 @@ Docker Container
 ├── Chromium (Xvfb 虚拟显示器) + Kimi WebBridge 扩展
 ├── kimi-webbridge daemon (:10086, 内部)
 ├── MCP Server (FastMCP :8000, 对外)
-│   └── API Key 鉴权
+│   ├── API Key 鉴权
+│   ├── 调用日志 (SQLite)
+│   └── Admin Panel (/admin)
 └── Health Monitor (自愈)
 ```
 
@@ -33,6 +35,10 @@ services:
     environment:
       - MCP_API_KEY=${MCP_API_KEY:?MCP_API_KEY must be set}
       - MCP_PORT=8000
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - ADMIN_SESSION_SECRET=${ADMIN_SESSION_SECRET:-}
+      - EXTERNAL_API_KEY=${EXTERNAL_API_KEY:-}
+      - DB_PATH=/home/chrome/data/call_records.db
     volumes:
       - chrome-data:/home/chrome/data
     shm_size: "2gb"
@@ -74,6 +80,11 @@ curl http://localhost:8000/health
 | `CDP_PORT` | 9222 | Chrome DevTools 端口 (内部) |
 | `DAEMON_PORT` | 10086 | WebBridge daemon 端口 (内部) |
 | `CHROME_BROWSER` | `chromium` | 浏览器二进制 (chromium / google-chrome-stable) |
+| `ADMIN_PASSWORD` | (空=关闭) | 管理面板登录密码，不设置则不启用面板 |
+| `ADMIN_SESSION_SECRET` | (自动生成) | 管理员会话签名密钥 |
+| `EXTERNAL_API_KEY` | (空) | 外部 API Key，可在管理面板中修改 |
+| `DB_PATH` | `/home/chrome/data/call_records.db` | SQLite 调用记录数据库路径 |
+| `CALL_RECORD_RETENTION_DAYS` | 30 | 调用记录保留天数 |
 
 ## AI IDE 配置
 
@@ -173,6 +184,18 @@ Skill 文件内容详解见 [kimi-browser.md](kimi-browser.md)。
 | `upload` | 上传文件到 file input |
 
 所有工具支持可选的 `session_id` 参数用于标签组隔离。
+
+## 管理面板
+
+设置 `ADMIN_PASSWORD` 环境变量后，访问 `/admin` 可打开管理面板：
+
+- **仪表盘**：总调用数、成功率、今日调用、活跃来源统计
+- **调用记录**：按方法/来源/日期/状态筛选，支持分页查看
+- **API Key 管理**：在线查看和修改外部 API Key
+
+管理面板使用独立的密码认证，与 MCP API Key 鉴权互不干扰。登录后会话保持 24 小时，支持频率限制（5 次/分钟）防止暴力破解。
+
+所有调用日志自动记录到 SQLite 数据库（`DB_PATH`），包含来源（API Key 前缀）、方法、耗时、状态等信息。日志中敏感参数（URL、密码、Token 等）自动脱敏，仅存储类型标识。
 
 ## 持久化
 
