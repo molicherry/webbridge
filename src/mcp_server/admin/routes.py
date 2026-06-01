@@ -4,9 +4,12 @@ All HTML is inlined. No template engine, no external CSS/JS frameworks.
 """
 
 import html as _html
+import json as _json
 import logging
+import os
 from typing import Any
 
+import httpx
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route, Router
@@ -22,6 +25,23 @@ from .auth import (
 )
 
 logger = logging.getLogger("kimi-webbridge-mcp.admin.routes")
+
+DAEMON_URL = os.environ.get("DAEMON_URL", "http://127.0.0.1:10086")
+_daemon_client: httpx.AsyncClient | None = None
+
+
+def _get_daemon() -> httpx.AsyncClient:
+    global _daemon_client
+    if _daemon_client is None:
+        _daemon_client = httpx.AsyncClient(base_url=DAEMON_URL, timeout=30.0)
+    return _daemon_client
+
+
+async def _daemon_call(action: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {"action": action, "args": args or {}}
+    resp = await _get_daemon().post("/command", json=body)
+    resp.raise_for_status()
+    return resp.json()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -281,6 +301,53 @@ async def api_set_config(request: Request) -> JSONResponse:
         return JSONResponse({"error": "internal error"}, status_code=500)
 
 
+async def api_tabs(request: Request) -> JSONResponse:
+    """GET /admin/api/tabs — list all open browser tabs."""
+    if not ADMIN_ENABLED:
+        return JSONResponse({"error": "admin disabled"}, status_code=404)
+
+    try:
+        data = await _daemon_call("list_tabs")
+        return JSONResponse(data)
+    except Exception:
+        logger.exception("Error listing tabs")
+        return JSONResponse({"error": "daemon unavailable"}, status_code=503)
+
+
+async def api_tabs_close(request: Request) -> JSONResponse:
+    """POST /admin/api/tabs/close — close a specific tab by index or URL."""
+    if not ADMIN_ENABLED:
+        return JSONResponse({"error": "admin disabled"}, status_code=404)
+
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    tab_index = body.get("index")
+    tab_url = body.get("url", "")
+
+    if tab_index is None and not tab_url:
+        return JSONResponse({"error": "index or url required"}, status_code=400)
+
+    args: dict[str, Any] = {}
+    if tab_index is not None:
+        try:
+            args["index"] = int(tab_index)
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "index must be an integer"}, status_code=400)
+    if tab_url:
+        args["url"] = str(tab_url)
+
+    try:
+        data = await _daemon_call("close_tab", args)
+        logger.info("Tab closed: index=%s, url=%s", tab_index, tab_url)
+        return JSONResponse(data)
+    except Exception:
+        logger.exception("Error closing tab")
+        return JSONResponse({"error": "daemon unavailable"}, status_code=503)
+
+
 # ── Router ───────────────────────────────────────────────────────────────
 
 routes = Router(
@@ -296,6 +363,9 @@ routes = Router(
         Route("/api/stats", endpoint=api_stats, methods=["GET"]),
         Route("/api/config", endpoint=api_get_config, methods=["GET"]),
         Route("/api/config", endpoint=api_set_config, methods=["POST"]),
+        # Tab management
+        Route("/api/tabs", endpoint=api_tabs, methods=["GET"]),
+        Route("/api/tabs/close", endpoint=api_tabs_close, methods=["POST"]),
     ]
 )
 
@@ -402,6 +472,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <button class="btn btn-primary btn-sm" id="update-key" type="button">更新</button>
       </div>
       <div class="config-msg" id="config-msg"></div>
+    </div>
+
+    <!-- Tabs Section -->
+    <div class="section">
+      <h2>浏览器页面管理 <button id="refresh-tabs" class="btn btn-outline btn-sm">刷新</button></h2>
+      <div id="tabs-container">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:40px">#</th>
+              <th>URL</th>
+              <th>标题</th>
+              <th style="width:120px">分组</th>
+              <th style="width:90px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="tabs-tbody"></tbody>
+        </table>
+      </div>
     </div>
 
     <!-- Records Section -->
@@ -676,9 +765,95 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       loadRecords();
     });
 
+    // ── Tabs Management ───────────────────────────────────────────────────
+    function loadTabs() {
+      var container = document.getElementById('tabs-container');
+      container.innerHTML = '<div class="empty">加载中…</div>';
+      fetch('/admin/api/tabs', {credentials:'same-origin'})
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if (d.error) {
+            container.innerHTML = '<div class="empty">守护进程不可用</div>';
+            return;
+          }
+          renderTabs(d);
+        })
+        .catch(function(){
+          document.getElementById('tabs-container').innerHTML =
+            '<table><thead><tr><th>#</th><th>URL</th><th>标题</th><th>分组</th><th>操作</th></tr></thead>' +
+            '<tbody><tr><td colspan="5" class="empty">守护进程不可用</td></tr></tbody></table>';
+        });
+    }
+
+    function renderTabs(data) {
+      var tabs = [];
+      if (data.data && Array.isArray(data.data.tabs)) {
+        tabs = data.data.tabs;
+      } else if (data.tabs && Array.isArray(data.tabs)) {
+        tabs = data.tabs;
+      } else if (Array.isArray(data)) {
+        tabs = data;
+      }
+
+      if (tabs.length === 0) {
+        document.getElementById('tabs-container').innerHTML =
+          '<table><thead><tr><th>#</th><th>URL</th><th>标题</th><th>分组</th><th>操作</th></tr></thead>' +
+          '<tbody><tr><td colspan="5" class="empty">暂无打开的页面</td></tr></tbody></table>';
+        return;
+      }
+
+      var html = '<table><thead><tr><th>#</th><th>URL</th><th>标题</th><th>分组</th><th>操作</th></tr></thead><tbody>';
+      for (var i = 0; i < tabs.length; i++) {
+        var t = tabs[i];
+        var url = escapeHtml(t.url || '');
+        var title = escapeHtml(t.title || '');
+        var group = escapeHtml(t.group_title || t.group || t.groupTitle || '-');
+        var index = t.index != null ? t.index : i;
+        html += '<tr>' +
+          '<td class="dim">' + (index + 1) + '</td>' +
+          '<td><span class="mono" title="' + url + '">' + truncate(url, 60) + '</span></td>' +
+          '<td>' + truncate(title, 40) + '</td>' +
+          '<td class="dim">' + group + '</td>' +
+          '<td><button class="btn btn-outline btn-sm" onclick="closeTab(' + index + ')" style="color:#e74c3c;border-color:#e74c3c;">关闭</button></td>' +
+          '</tr>';
+      }
+      html += '</tbody></table>';
+      document.getElementById('tabs-container').innerHTML = html;
+    }
+
+    function closeTab(index) {
+      if (!confirm('确定要关闭此页面吗？')) return;
+      fetch('/admin/api/tabs/close', {
+        method:'POST',
+        credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({index: index})
+      })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if (d.error) {
+            showToast('关闭失败: ' + d.error, 'error');
+          } else {
+            showToast('页面已关闭', 'success');
+            loadTabs();
+          }
+        })
+        .catch(function(){
+          showToast('网络错误', 'error');
+        });
+    }
+
+    function truncate(str, len) {
+      if (!str) return '-';
+      return str.length > len ? str.substring(0, len) + '…' : str;
+    }
+
+    document.getElementById('refresh-tabs').addEventListener('click', loadTabs);
+
     // ── Init ─────────────────────────────────────────────────────────────
     loadStats();
     loadConfig();
+    loadTabs();
     loadRecords();
   </script>
 </body>
