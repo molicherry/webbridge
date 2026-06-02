@@ -1,14 +1,15 @@
+---
+name: kimi-browser
+description: Remote browser control via MCP — navigate, click, fill forms, screenshot, save as PDF, run JavaScript, monitor network requests, upload files. Persistent cookies and localStorage mean login state is reused automatically across calls. Use this skill whenever the user wants to browse the web, automate browser tasks, scrape webpage content, log in to a site, fill out web forms, capture screenshots, export pages to PDF, monitor API calls, or debug a webpage. Also use when the user mentions "browser", "webpage", "open URL", "screenshot", "scrape", "automation", "MCP browser", or Chinese keywords like "浏览器" "网页" "截图" "抓取" "自动化" "登录网站" "填表单". Session isolation (via session_id) supports parallel multi-task workflows.
+---
+
 # Kimi Browser — Remote Browser Control via MCP
 
-You have access to a **remote Chromium browser** running in a Docker container, controlled via MCP. It has full web browsing capabilities with persistent cookies and session state.
+You have access to a **remote browser** controlled via MCP. It has full web browsing capabilities with persistent cookies, localStorage, and cache shared across all sessions — **login state is reused automatically between calls**.
 
-## Architecture
-
-```
-You (Claude Code) ──MCP──▶ MCP Server (:8000) ──▶ Daemon (:10086) ──WebSocket──▶ Chromium + Kimi Extension
-```
-
-The browser is real Chromium with Xvfb virtual display. It shares the same profile across sessions — cookies, localStorage, and cache are **all shared**.
+> **MCP tool name prefix**: All tools in this skill are exposed under the `mcp__kimi-browser__*` namespace.
+> For brevity, this document refers to them by their short names (e.g. `navigate`, `click`, `snapshot`).
+> When invoking, use the full MCP names: `mcp__kimi-browser__navigate`, `mcp__kimi-browser__click`, `mcp__kimi-browser__snapshot`, etc.
 
 ## Core Workflow
 
@@ -73,7 +74,7 @@ session_id="task-form"    → green tab group
 3. **Use evaluate for data extraction** — `snapshot` gives structure, `evaluate` gives data. Combine them.
 4. **Clean up sessions** — Call `close_session` when done to keep the browser manageable.
 5. **One session per task** — Different tasks should use different `session_id` values.
-6. **Browser state is persistent** — Cookies and session data survive container restarts (stored in Docker volume).
+6. **Browser state is persistent** — Cookies and session data are reused across calls; you typically don't need to log in twice.
 7. **Wait for page loads** — After `navigate`, the tool waits up to 30s for the page to fully load.
 8. **Network monitoring for debugging** — Use `network` to inspect API calls when a page behaves unexpectedly.
 
@@ -115,3 +116,39 @@ network("detail", request_id="123")  → inspect response body
 screenshot()                         → visual check
 evaluate("document.title")           → quick JS check
 ```
+
+## Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---------|--------------|-----|
+| **All MCP calls fail with connection error** | MCP server unreachable | Report to the user — this is a deployment/runtime issue outside the skill's control |
+| **`snapshot` returns empty / no `@e` refs** | Page not fully loaded, or JavaScript-heavy SPA still rendering | Wait a moment then re-snapshot; or use `evaluate("document.readyState")` to confirm; for SPAs, poll until target elements appear |
+| **`click(@eXX)` does nothing** | Element is `display:none`, detached, inside shadow DOM, or behind an overlay | Fall back to `mouse_click(@eXX)` — it uses real CDP mouse events with scroll-into-view |
+| **`fill` doesn't replace content in a rich text editor** | The editor is contenteditable and intercepts value setting | Use `key_type` instead — it inserts text at cursor position via real keyboard events |
+| **Session seems "stuck" / wrong page shown** | Stale tab in the session group, or navigation happened in a different tab | Run `list_tabs(session_id)` to inspect; use `find_tab` to locate the right one; or `close_session` + start fresh |
+| **Tabs accumulating, browser slow** | Forgot to call `close_session` after previous tasks | Always call `close_session(session_id)` at task end; for cleanup, list and close orphaned sessions |
+| **`navigate` times out after 30s** | Slow target site, or remote browser cannot reach the URL | Retry once; if persistent, report to the user with the URL |
+| **Cookies/login state lost unexpectedly** | Remote state was cleared, or session profile changed | Re-login; if it keeps happening, report to the user |
+| **`upload` fails** | File path is client-side, not on the remote browser's filesystem | `upload` expects paths reachable by the remote browser; ensure the file is accessible there before calling |
+| **`evaluate` returns `undefined` for async code** | Missing `await` or implicit return | Wrap in IIFE: `(async () => { const r = await fetch(...); return await r.json(); })()` |
+
+### Recovery checklist when things go wrong
+
+1. `list_tabs(session_id)` — confirm tabs exist and are on the expected URL
+2. `screenshot(session_id)` — visually verify page state
+3. `evaluate("document.readyState", session_id)` — confirm page finished loading
+4. `evaluate("document.title", session_id)` — confirm you're on the right page
+5. If all fails: `close_session(session_id)` and restart the flow from `navigate`
+
+## Behavior & Limitations
+
+* **Skill version**: 1.0 (2026-06)
+* **State persistence**: Cookies, localStorage, IndexedDB, and cache persist across calls — login state is reused automatically
+* **Concurrency**: Multiple sessions identified by `session_id`; tab groups are visually color-coded per session
+* **Known limitations**:
+  - File uploads require paths reachable by the remote browser (no client-side upload bridge)
+  - All sessions share the same browser profile (no profile-level isolation)
+  - 30-second hard timeout on `navigate` page loads
+  - Shadow DOM elements may require `mouse_click` instead of `click`
+  - No built-in download interception — use `cdp("Page.setDownloadBehavior", ...)` if needed
+* **Compatibility**: Prefer the full `mcp__kimi-browser__*` tool names in production scripts — short names may evolve.
