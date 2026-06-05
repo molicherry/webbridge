@@ -15,7 +15,8 @@ logger = logging.getLogger("kimi-webbridge-mcp.call-logger")
 # ── Request context (set by middleware) ──────────────────────────────────
 
 request_source: ContextVar[str] = ContextVar("request_source", default="unknown")
-"""API key prefix or 'internal'."""
+request_key_id: ContextVar[str] = ContextVar("request_key_id", default="")
+request_key_alias: ContextVar[str] = ContextVar("request_key_alias", default="")
 request_client_ip: ContextVar[str] = ContextVar("request_client_ip", default="")
 request_user_agent: ContextVar[str] = ContextVar("request_user_agent", default="")
 
@@ -61,11 +62,27 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_call_source    ON call_records(source);
         CREATE INDEX IF NOT EXISTS idx_call_status    ON call_records(result_status);
 
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id              TEXT PRIMARY KEY,
+            key_value       TEXT UNIQUE NOT NULL,
+            alias           TEXT NOT NULL DEFAULT '',
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
         CREATE TABLE IF NOT EXISTS admin_config (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL DEFAULT ''
         );
     """)
+    try:
+        conn.execute("ALTER TABLE call_records ADD COLUMN key_alias TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_call_key_alias ON call_records(key_alias)")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     logger.info("Database initialized at %s", DB_PATH)
 
@@ -84,13 +101,15 @@ def log_call(
 ) -> None:
     """Record a tool call. Fire-and-forget — never raise."""
     try:
+        key_alias = request_key_alias.get() or source[:8]
         conn = _get_conn()
         conn.execute(
             """INSERT INTO call_records
-               (source, method, params, result_status, duration_ms, client_ip, user_agent, error_msg)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (source, key_alias, method, params, result_status, duration_ms, client_ip, user_agent, error_msg)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 source[:64],
+                key_alias[:64],
                 method[:128],
                 json.dumps(params or {}, ensure_ascii=False),
                 result_status,
@@ -179,7 +198,7 @@ def get_stats() -> dict:
     sources = [
         dict(r)
         for r in conn.execute(
-            "SELECT source, COUNT(*) as cnt FROM call_records GROUP BY source ORDER BY cnt DESC LIMIT 10"
+            "SELECT key_alias, COUNT(*) as cnt FROM call_records WHERE key_alias != '' GROUP BY key_alias ORDER BY cnt DESC LIMIT 10"
         ).fetchall()
     ]
 
@@ -222,6 +241,88 @@ def cleanup_old_records(days: int | None = None) -> int:
     except Exception:
         logger.exception("Failed to cleanup old records")
         return 0
+
+
+# ── Admin Config (key-value store) ──────────────────────────────────────
+
+
+def get_api_keys() -> list[dict]:
+    """List all API keys with usage stats."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """SELECT k.*, COUNT(c.id) as call_count
+           FROM api_keys k LEFT JOIN call_records c ON c.key_alias = k.alias
+           GROUP BY k.id ORDER BY k.created_at DESC"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_api_key_by_value(key_value: str) -> dict | None:
+    """Find an enabled API key by its value. Returns None if not found or disabled."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM api_keys WHERE key_value = ? AND enabled = 1", (key_value,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def create_api_key(key_value: str, alias: str) -> dict:
+    """Create a new API key. Returns the created record."""
+    import uuid
+    key_id = str(uuid.uuid4())[:8]
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO api_keys (id, key_value, alias) VALUES (?, ?, ?)",
+        (key_id, key_value, alias),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM api_keys WHERE id = ?", (key_id,)).fetchone()
+    return dict(row)
+
+
+def update_api_key(key_id: str, alias: str | None = None, enabled: bool | None = None) -> bool:
+    """Update an API key's alias or enabled status."""
+    updates = []
+    params = []
+    if alias is not None:
+        updates.append("alias = ?")
+        params.append(alias)
+    if enabled is not None:
+        updates.append("enabled = ?")
+        params.append(1 if enabled else 0)
+    if not updates:
+        return False
+    params.append(key_id)
+    conn = _get_conn()
+    conn.execute(f"UPDATE api_keys SET {', '.join(updates)} WHERE id = ?", params)
+    conn.commit()
+    return conn.total_changes > 0
+
+
+def delete_api_key(key_id: str) -> bool:
+    """Delete an API key. Returns True if deleted."""
+    conn = _get_conn()
+    conn.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
+    conn.commit()
+    return conn.total_changes > 0
+
+
+def bootstrap_default_key() -> None:
+    """Ensure the MCP_API_KEY env var key exists in api_keys table."""
+    import os as _os
+    default_key = _os.environ.get("MCP_API_KEY", "")
+    if not default_key:
+        return
+    conn = _get_conn()
+    existing = conn.execute("SELECT id FROM api_keys WHERE key_value = ?", (default_key,)).fetchone()
+    if not existing:
+        import uuid
+        conn.execute(
+            "INSERT INTO api_keys (id, key_value, alias, enabled) VALUES (?, ?, ?, 1)",
+            (str(uuid.uuid4())[:8], default_key, "默认密钥"),
+        )
+        conn.commit()
+        logger.info("Bootstrapped default API key")
 
 
 # ── Admin Config (key-value store) ──────────────────────────────────────

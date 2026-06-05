@@ -11,10 +11,10 @@ logger = logging.getLogger("kimi-webbridge-mcp")
 from fastmcp import FastMCP
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 
-from .auth import APIKeyMiddleware, get_api_key
-from .call_logger import init_db, cleanup_old_records, request_source, request_client_ip, request_user_agent
+from .auth import APIKeyMiddleware
+from .call_logger import init_db, cleanup_old_records, request_source, request_client_ip, request_user_agent, bootstrap_default_key
 from .config import ADMIN_ENABLED
 from .tools import TOOL_REGISTRY
 
@@ -32,10 +32,6 @@ for handler, description in TOOL_REGISTRY:
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
     """Capture request metadata into ContextVars for call logging."""
-
-    def __init__(self, app, api_key: str) -> None:
-        super().__init__(app)
-        self.api_key = api_key
 
     async def dispatch(self, request: Request, call_next) -> None:
         key = request.headers.get("X-API-Key", "")
@@ -57,17 +53,23 @@ async def health(request):
     return JSONResponse({"status": "ok", "server": SERVER_NAME, "version": SERVER_VERSION})
 
 
+@mcp.custom_route("/admin", methods=["GET", "POST"])
+async def admin_redirect(request):
+    """Redirect /admin to /admin/ to avoid Cloudflare HTTP redirect."""
+    return RedirectResponse(url="/admin/", status_code=307)
+
+
 def main():
     init_db()
-    logger.info("Database initialized")
+    bootstrap_default_key()
+    logger.info("Database initialized, default key bootstrapped")
 
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("MCP_PORT", "8000"))
-    api_key = get_api_key()
 
     app = mcp.http_app(stateless_http=True, json_response=True, path="/mcp")
-    app.add_middleware(APIKeyMiddleware, api_key=api_key)
-    app.add_middleware(RequestContextMiddleware, api_key=api_key)
+    app.add_middleware(APIKeyMiddleware)
+    app.add_middleware(RequestContextMiddleware)
 
     if ADMIN_ENABLED:
         from .admin.auth import AdminAuthMiddleware

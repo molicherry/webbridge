@@ -75,15 +75,14 @@ curl http://localhost:8000/health
 
 | 环境变量 | 默认值 | 说明 |
 |---------|--------|------|
-| `MCP_API_KEY` | (必填) | API 鉴权密钥 |
+| `MCP_API_KEY` | (必填) | 默认 API 密钥，启动时自动导入为初始密钥 |
 | `MCP_PORT` | 8000 | MCP 服务端口 |
 | `CDP_PORT` | 9222 | Chrome DevTools 端口 (内部) |
 | `DAEMON_PORT` | 10086 | WebBridge daemon 端口 (内部) |
 | `CHROME_BROWSER` | `chromium` | 浏览器二进制 (chromium / google-chrome-stable) |
 | `ADMIN_PASSWORD` | (空=关闭) | 管理面板登录密码，不设置则不启用面板 |
 | `ADMIN_SESSION_SECRET` | (自动生成) | 管理员会话签名密钥 |
-| `EXTERNAL_API_KEY` | (空) | 外部 API Key，可在管理面板中修改 |
-| `DB_PATH` | `/home/chrome/data/call_records.db` | SQLite 调用记录数据库路径 |
+| `DB_PATH` | `/home/chrome/data/call_records.db` | SQLite 数据库路径（调用记录 + API 密钥 + 会话映射） |
 | `CALL_RECORD_RETENTION_DAYS` | 30 | 调用记录保留天数 |
 
 ## AI IDE 配置
@@ -190,12 +189,26 @@ Skill 文件内容详解见 [kimi-browser.md](kimi-browser.md)。
 设置 `ADMIN_PASSWORD` 环境变量后，访问 `/admin` 可打开管理面板：
 
 - **仪表盘**：总调用数、成功率、今日调用、活跃来源统计
-- **调用记录**：按方法/来源/日期/状态筛选，支持分页查看
-- **API Key 管理**：在线查看和修改外部 API Key
+- **调用记录**：按方法/密钥/日期/状态筛选，支持分页查看，显示每笔调用的密钥别名、耗时
+- **API Key 管理**：支持创建、改名、启用/禁用、删除多个 API 密钥。默认 `MCP_API_KEY` 环境变量自动导入为初始密钥，可通过面板添加额外密钥
+- **Tab 管理**：查看所有打开的浏览器标签页（URL、标题、关联密钥、会话、分组），支持关闭指定标签
+
+### 多密钥鉴权
+
+MCP Server 支持多个 API 密钥，所有密钥存储在 SQLite 的 `api_keys` 表中。启动时 `MCP_API_KEY` 环境变量会被自动导入为"默认密钥"。管理面板支持：
+
+- 创建新密钥（自动生成或手动指定）
+- 为密钥设置别名（便于在调用记录中识别来源）
+- 启用/禁用密钥（禁用后立即拒绝请求）
+- 删除密钥
+
+### Session 追踪
+
+每次 `navigate()` 调用会自动记录 URL → session_id → 密钥别名的映射关系。管理面板的 Tab 管理页面通过 Chrome DevTools Protocol 直接查询浏览器真实标签页，并关联到对应的密钥和会话信息。
+
+调用日志中敏感参数（URL、密码、Token 等）自动脱敏，仅存储类型标识。密钥在仪表盘中以掩码形式展示（前 6 位 + 后 4 位）。
 
 管理面板使用独立的密码认证，与 MCP API Key 鉴权互不干扰。登录后会话保持 24 小时，支持频率限制（5 次/分钟）防止暴力破解。
-
-所有调用日志自动记录到 SQLite 数据库（`DB_PATH`），包含来源（API Key 前缀）、方法、耗时、状态等信息。日志中敏感参数（URL、密码、Token 等）自动脱敏，仅存储类型标识。
 
 ## 持久化
 

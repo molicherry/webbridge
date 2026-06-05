@@ -1,4 +1,3 @@
-import os
 import secrets
 from typing import Any
 
@@ -6,13 +5,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from .call_logger import get_api_key_by_value, request_key_alias, request_source
+
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
-    """Validate X-API-Key header against configured API key."""
-
-    def __init__(self, app: Any, api_key: str) -> None:
-        super().__init__(app)
-        self.api_key = api_key
+    """Validate X-API-Key header against api_keys table."""
 
     async def dispatch(self, request: Request, call_next: Any) -> Any:
         if request.method == "GET" and request.url.path == "/health":
@@ -22,16 +19,18 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         key = request.headers.get("X-API-Key", "")
-        if not secrets.compare_digest(key, self.api_key):
-            return JSONResponse(
-                {"jsonrpc": "2.0", "error": {"code": -32001, "message": "Unauthorized: missing or invalid X-API-Key header"}, "id": None},
-                status_code=401,
-            )
-        return await call_next(request)
+        if key:
+            key_info = get_api_key_by_value(key)
+            if key_info:
+                token_alias = request_key_alias.set(key_info["alias"])
+                token_source = request_source.set(key[:8])
+                try:
+                    return await call_next(request)
+                finally:
+                    request_key_alias.reset(token_alias)
+                    request_source.reset(token_source)
 
-
-def get_api_key() -> str:
-    key = os.environ.get("MCP_API_KEY", "")
-    if not key:
-        raise RuntimeError("MCP_API_KEY environment variable is required but not set")
-    return key
+        return JSONResponse(
+            {"jsonrpc": "2.0", "error": {"code": -32001, "message": "Unauthorized: missing or invalid X-API-Key header"}, "id": None},
+            status_code=401,
+        )

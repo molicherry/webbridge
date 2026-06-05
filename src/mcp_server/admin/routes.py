@@ -14,8 +14,9 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route, Router
 
-from ..call_logger import get_config, get_records, get_stats, set_config
-from ..config import ADMIN_ENABLED, EXTERNAL_API_KEY
+from ..call_logger import get_config, get_records, get_stats, set_config, get_api_keys, create_api_key, update_api_key, delete_api_key
+from ..config import ADMIN_ENABLED, CDP_URL, EXTERNAL_API_KEY
+from ..session_tracker import get_session as _get_tab_session
 from .auth import (
     COOKIE_NAME,
     SESSION_MAX_AGE,
@@ -186,7 +187,7 @@ async def login_submit(request: Request) -> Response:
     if verify_password(password):
         token = create_session_token()
         logger.info("Admin login successful from %s", ip)
-        response: Response = RedirectResponse(url="/admin", status_code=302)
+        response: Response = RedirectResponse(url="/admin/", status_code=302)
         response.set_cookie(
             COOKIE_NAME,
             token,
@@ -219,7 +220,7 @@ async def dashboard(request: Request) -> HTMLResponse:
     if not ADMIN_ENABLED:
         return _admin_disabled_page()
 
-    return HTMLResponse(DASHBOARD_HTML)
+    return HTMLResponse(DASHBOARD_HTML, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 async def api_records(request: Request) -> JSONResponse:
@@ -302,20 +303,46 @@ async def api_set_config(request: Request) -> JSONResponse:
 
 
 async def api_tabs(request: Request) -> JSONResponse:
-    """GET /admin/api/tabs — list all open browser tabs."""
+    """GET /admin/api/tabs — list ALL open browser tabs via Chrome CDP.
+
+    Queries Chrome CDP /json/list directly (bypasses daemon session filter)
+    and enriches results with session/group info from the session tracker.
+    """
     if not ADMIN_ENABLED:
         return JSONResponse({"error": "admin disabled"}, status_code=404)
 
     try:
-        data = await _daemon_call("list_tabs")
-        return JSONResponse(data)
+        async with httpx.AsyncClient(timeout=10.0) as cdp:
+            cdp_resp = await cdp.get(f"{CDP_URL}/json/list")
+            cdp_resp.raise_for_status()
+            targets = cdp_resp.json()
     except Exception:
-        logger.exception("Error listing tabs")
-        return JSONResponse({"error": "daemon unavailable"}, status_code=503)
+        logger.exception("Error querying Chrome CDP")
+        return JSONResponse({"error": "chrome CDP unavailable"}, status_code=503)
+
+    tabs: list[dict[str, Any]] = []
+    for i, t in enumerate(targets):
+        if t.get("type") != "page":
+            continue
+        url = t.get("url", "")
+        if not url or url.startswith("chrome://") or url == "about:blank":
+            continue
+        session_info = _get_tab_session(url)
+        tabs.append({
+            "index": i,
+            "targetId": t.get("id", ""),
+            "url": url,
+            "title": t.get("title", ""),
+            "session": session_info["session_id"] if session_info else "—",
+            "group": session_info["group_title"] if session_info else "—",
+            "key": session_info.get("key_alias", "") or "—",
+        })
+
+    return JSONResponse({"data": {"success": True, "tabs": tabs}})
 
 
 async def api_tabs_close(request: Request) -> JSONResponse:
-    """POST /admin/api/tabs/close — close a specific tab by index or URL."""
+    """POST /admin/api/tabs/close — close a specific tab via Chrome CDP."""
     if not ADMIN_ENABLED:
         return JSONResponse({"error": "admin disabled"}, status_code=404)
 
@@ -324,28 +351,90 @@ async def api_tabs_close(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "invalid JSON body"}, status_code=400)
 
-    tab_index = body.get("index")
-    tab_url = body.get("url", "")
+    target_id = body.get("targetId", "")
 
-    if tab_index is None and not tab_url:
-        return JSONResponse({"error": "index or url required"}, status_code=400)
-
-    args: dict[str, Any] = {}
-    if tab_index is not None:
-        try:
-            args["index"] = int(tab_index)
-        except (ValueError, TypeError):
-            return JSONResponse({"error": "index must be an integer"}, status_code=400)
-    if tab_url:
-        args["url"] = str(tab_url)
+    if not target_id:
+        return JSONResponse({"error": "targetId required"}, status_code=400)
 
     try:
-        data = await _daemon_call("close_tab", args)
-        logger.info("Tab closed: index=%s, url=%s", tab_index, tab_url)
-        return JSONResponse(data)
+        async with httpx.AsyncClient(timeout=10.0) as cdp:
+            cdp_resp = await cdp.get(f"{CDP_URL}/json/close/{target_id}")
+            cdp_resp.raise_for_status()
+        logger.info("Tab closed via CDP: targetId=%s", target_id[:16])
+        return JSONResponse({"success": True})
     except Exception:
-        logger.exception("Error closing tab")
-        return JSONResponse({"error": "daemon unavailable"}, status_code=503)
+        logger.exception("Error closing tab via CDP")
+        return JSONResponse({"error": "chrome CDP unavailable"}, status_code=503)
+
+
+async def api_keys(request: Request) -> JSONResponse:
+    """GET /admin/api/keys — list all API keys with usage stats."""
+    if not ADMIN_ENABLED:
+        return JSONResponse({"error": "admin disabled"}, status_code=404)
+    try:
+        keys = get_api_keys()
+        return JSONResponse({"keys": keys})
+    except Exception:
+        logger.exception("Error listing keys")
+        return JSONResponse({"error": "internal error"}, status_code=500)
+
+
+async def api_keys_create(request: Request) -> JSONResponse:
+    """POST /admin/api/keys — create a new API key."""
+    if not ADMIN_ENABLED:
+        return JSONResponse({"error": "admin disabled"}, status_code=404)
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    key_value = str(body.get("key_value", ""))
+    alias = str(body.get("alias", ""))
+    if not key_value:
+        key_value = f"kimi-{secrets.token_hex(16)}"
+    if not alias:
+        alias = f"key-{key_value[:8]}"
+    try:
+        key = create_api_key(key_value, alias)
+        return JSONResponse({"key": key})
+    except Exception as e:
+        logger.exception("Error creating key")
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+async def api_keys_update(request: Request) -> JSONResponse:
+    """PUT /admin/api/keys/{key_id} — update alias or enabled status."""
+    if not ADMIN_ENABLED:
+        return JSONResponse({"error": "admin disabled"}, status_code=404)
+    key_id = request.path_params.get("key_id", "")
+    if not key_id:
+        return JSONResponse({"error": "key_id required"}, status_code=400)
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    alias = body.get("alias")
+    enabled = body.get("enabled")
+    try:
+        ok = update_api_key(key_id, alias=alias, enabled=enabled)
+        return JSONResponse({"success": ok})
+    except Exception as e:
+        logger.exception("Error updating key")
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+async def api_keys_delete(request: Request) -> JSONResponse:
+    """DELETE /admin/api/keys/{key_id} — delete an API key."""
+    if not ADMIN_ENABLED:
+        return JSONResponse({"error": "admin disabled"}, status_code=404)
+    key_id = request.path_params.get("key_id", "")
+    if not key_id:
+        return JSONResponse({"error": "key_id required"}, status_code=400)
+    try:
+        ok = delete_api_key(key_id)
+        return JSONResponse({"success": ok})
+    except Exception as e:
+        logger.exception("Error deleting key")
+        return JSONResponse({"error": str(e)}, status_code=400)
 
 
 # ── Router ───────────────────────────────────────────────────────────────
@@ -366,6 +455,11 @@ routes = Router(
         # Tab management
         Route("/api/tabs", endpoint=api_tabs, methods=["GET"]),
         Route("/api/tabs/close", endpoint=api_tabs_close, methods=["POST"]),
+        # API key management
+        Route("/api/keys", endpoint=api_keys, methods=["GET"]),
+        Route("/api/keys", endpoint=api_keys_create, methods=["POST"]),
+        Route("/api/keys/{key_id}", endpoint=api_keys_update, methods=["PUT"]),
+        Route("/api/keys/{key_id}", endpoint=api_keys_delete, methods=["DELETE"]),
     ]
 )
 
@@ -460,18 +554,38 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="stat-card"><div class="label">活跃来源</div><div class="value" id="stat-sources">--</div></div>
     </div>
 
-    <!-- Config Section -->
+    <!-- Key Management Section -->
     <div class="section">
-      <h2>外部 API Key 配置</h2>
-      <div class="config-row">
-        <div class="field">
-          <label for="config-key">API Key</label>
-          <input type="password" id="config-key" readonly>
-        </div>
-        <button class="btn btn-outline btn-sm" id="toggle-key" type="button">显示</button>
-        <button class="btn btn-primary btn-sm" id="update-key" type="button">更新</button>
+      <h2>API Key 管理 <button id="create-key-btn" class="btn btn-primary btn-sm" type="button">+ 新建密钥</button></h2>
+      <div id="keys-container">
+        <table>
+          <thead>
+            <tr>
+              <th>别名</th>
+              <th>密钥</th>
+              <th>状态</th>
+              <th>调用次数</th>
+              <th>创建时间</th>
+              <th style="width:120px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="keys-tbody"></tbody>
+        </table>
       </div>
-      <div class="config-msg" id="config-msg"></div>
+      <!-- Create Key Modal -->
+      <div id="create-key-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:200; align-items:center; justify-content:center;">
+        <div style="background:#fff; border-radius:8px; padding:24px; width:400px; max-width:90vw;">
+          <h3 style="margin-bottom:16px;">新建 API Key</h3>
+          <label style="font-size:13px;display:block;margin-bottom:4px;">别名</label>
+          <input id="new-key-alias" style="width:100%;padding:8px;border:1px solid #d9d9d9;border-radius:4px;margin-bottom:12px;" placeholder="例如: 客户A">
+          <label style="font-size:13px;display:block;margin-bottom:4px;">密钥（留空自动生成）</label>
+          <input id="new-key-value" style="width:100%;padding:8px;border:1px solid #d9d9d9;border-radius:4px;margin-bottom:16px;" placeholder="自动生成 64 位随机密钥">
+          <div style="display:flex;gap:8px;justify-content:flex-end;">
+            <button id="cancel-create-key" class="btn btn-outline btn-sm" type="button">取消</button>
+            <button id="confirm-create-key" class="btn btn-primary btn-sm" type="button">创建</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Tabs Section -->
@@ -484,7 +598,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <th style="width:40px">#</th>
               <th>URL</th>
               <th>标题</th>
-              <th style="width:120px">分组</th>
+              <th style="width:70px">密钥</th>
+              <th style="width:80px">会话</th>
+              <th style="width:100px">分组</th>
               <th style="width:90px">操作</th>
             </tr>
           </thead>
@@ -495,7 +611,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     <!-- Records Section -->
     <div class="section">
-      <h2>调用记录</h2>
+      <h2>调用记录 <button id="refresh-records" class="btn btn-outline btn-sm">刷新</button></h2>
       <!-- Filters -->
       <div class="filter-row" id="filter-row">
         <div class="field">
@@ -503,8 +619,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <select id="filter-method"><option value="">全部</option></select>
         </div>
         <div class="field">
-          <label>来源</label>
-          <input type="text" id="filter-source" placeholder="输入来源前缀">
+          <label>密钥</label>
+          <input type="text" id="filter-source" placeholder="输入密钥别名">
         </div>
         <div class="field">
           <label>开始日期</label>
@@ -531,7 +647,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <thead>
             <tr>
               <th>时间</th>
-              <th>来源</th>
+              <th>密钥</th>
               <th>方法</th>
               <th>耗时</th>
               <th>状态</th>
@@ -553,7 +669,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     // ── State ────────────────────────────────────────────────────────────
     var currentPage = 1;
     var totalPages = 1;
-    var currentConfigKey = '';
 
     // ── Helpers ──────────────────────────────────────────────────────────
     function formatDate(ts) {
@@ -598,87 +713,88 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         .catch(function(){});
     }
 
-    // ── Config ───────────────────────────────────────────────────────────
-    function maskKey(key) {
-      if (!key) return '';
-      if (key.length <= 8) return '*'.repeat(key.length);
-      return key.substring(0, 4) + '*'.repeat(key.length - 8) + key.substring(key.length - 4);
-    }
-
-    function loadConfig() {
-      fetch('/admin/api/config', {credentials:'same-origin'})
+    // ── API Key Management ─────────────────────────────────────────────
+    function loadKeys() {
+      fetch('/admin/api/keys', {credentials:'same-origin'})
         .then(function(r){ return r.json(); })
         .then(function(d){
-          currentConfigKey = d.external_api_key || '';
-          var input = document.getElementById('config-key');
-          input.value = maskKey(currentConfigKey) || '未设置';
-          input.type = 'password';
-          var toggle = document.getElementById('toggle-key');
-          toggle.textContent = '显示';
-          document.getElementById('config-msg').textContent = '';
-        })
-        .catch(function(){});
-    }
-
-    document.getElementById('toggle-key').addEventListener('click', function(){
-      var input = document.getElementById('config-key');
-      var toggle = document.getElementById('toggle-key');
-      if (input.type === 'password') {
-        if (!currentConfigKey) {
-          showToast('未设置 API Key', 'error');
-          return;
-        }
-        input.type = 'text';
-        input.value = currentConfigKey;
-        toggle.textContent = '隐藏';
-      } else {
-        input.type = 'password';
-        input.value = maskKey(currentConfigKey);
-        toggle.textContent = '显示';
-      }
-    });
-
-    document.getElementById('update-key').addEventListener('click', function(){
-      var newKey = prompt('请输入新的外部 API Key:');
-      if (newKey === null) return; // cancelled
-      if (newKey === '') {
-        showToast('API Key 不能为空', 'error');
-        return;
-      }
-      var btn = document.getElementById('update-key');
-      btn.disabled = true;
-      btn.textContent = '更新中…';
-      fetch('/admin/api/config', {
-        method:'POST',
-        credentials:'same-origin',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({value: newKey})
-      })
-        .then(function(r){ return r.json(); })
-        .then(function(d){
-          if (d.success) {
-            currentConfigKey = newKey;
-            var input = document.getElementById('config-key');
-            input.value = maskKey(newKey);
-            input.type = 'password';
-            document.getElementById('toggle-key').textContent = '显示';
-            document.getElementById('config-msg').innerHTML = '<span style="color:#27ae60">API Key 已更新</span>';
-            showToast('更新成功', 'success');
-          } else {
-            document.getElementById('config-msg').innerHTML = '<span style="color:#e74c3c">更新失败: ' + (d.error||'未知错误') + '</span>';
-            showToast('更新失败', 'error');
+          if (d.error) return;
+          var tbody = document.getElementById('keys-tbody');
+          var keys = d.keys || [];
+          if (!keys.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无密钥</td></tr>'; return; }
+          var h = '';
+          for (var i = 0; i < keys.length; i++) {
+            var k = keys[i];
+            var masked = k.key_value ? (k.key_value.substring(0,6) + '****' + k.key_value.substring(k.key_value.length-4)) : '****';
+            var statusBadge = k.enabled ? '<span style="color:#27ae60;font-weight:500;">启用</span>' : '<span style="color:#e74c3c;font-weight:500;">禁用</span>';
+            h += '<tr>' +
+              '<td><span class="mono">' + escapeHtml(k.alias || '-') + '</span></td>' +
+              '<td><span class="mono dim" title="' + escapeHtml(k.key_value||'') + '">' + escapeHtml(masked) + '</span></td>' +
+              '<td>' + statusBadge + '</td>' +
+              '<td>' + (k.call_count || 0) + '</td>' +
+              '<td class="dim">' + formatDate(k.created_at) + '</td>' +
+              '<td>' +
+                '<button class="btn btn-outline btn-sm key-edit-btn" data-key-id="' + k.id + '" data-key-alias="' + escapeHtml(k.alias||'') + '" style="font-size:11px;">改名</button> ' +
+                '<button class="btn btn-outline btn-sm key-toggle-btn" data-key-id="' + k.id + '" data-key-enabled="' + k.enabled + '" style="font-size:11px;">' + (k.enabled ? '禁用' : '启用') + '</button> ' +
+                '<button class="btn btn-outline btn-sm key-delete-btn" data-key-id="' + k.id + '" style="color:#e74c3c;border-color:#e74c3c;font-size:11px;">删除</button>' +
+              '</td></tr>';
           }
-        })
-        .catch(function(){
-          showToast('网络错误', 'error');
-        })
-        .finally(function(){
-          btn.disabled = false;
-          btn.textContent = '更新';
-        });
-    });
+          tbody.innerHTML = h;
+        }).catch(function(){});
+    }
 
-    // ── Records ──────────────────────────────────────────────────────────
+    document.getElementById('create-key-btn').addEventListener('click', function(){
+      document.getElementById('create-key-modal').style.display = 'flex';
+    });
+    document.getElementById('cancel-create-key').addEventListener('click', function(){
+      document.getElementById('create-key-modal').style.display = 'none';
+    });
+    document.getElementById('confirm-create-key').addEventListener('click', function(){
+      var alias = document.getElementById('new-key-alias').value.trim() || 'new-key';
+      var keyValue = document.getElementById('new-key-value').value.trim();
+      this.disabled = true;
+      fetch('/admin/api/keys', {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({alias: alias, key_value: keyValue})
+      }).then(function(r){ return r.json(); })
+        .then(function(d){
+          if (d.key) {
+            document.getElementById('create-key-modal').style.display = 'none';
+            showToast('密钥已创建:' + (d.key.key_value ? ' ' + d.key.key_value.substring(0,8)+'...' : ''), 'success');
+            loadKeys();
+          } else { showToast('创建失败: ' + (d.error||''), 'error'); }
+        }).catch(function(){ showToast('网络错误', 'error'); })
+        .finally(function(){ document.getElementById('confirm-create-key').disabled = false; });
+    });
+    function editKeyAlias(id, curAlias) {
+      var alias = prompt('修改别名:', curAlias);
+      if (alias === null) return;
+      fetch('/admin/api/keys/' + id, {
+        method:'PUT', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({alias: alias})
+      }).then(function(r){ return r.json(); })
+        .then(function(d){ if (d.success) { showToast('别名已更新', 'success'); loadKeys(); } else { showToast('更新失败', 'error'); } })
+        .catch(function(){ showToast('网络错误', 'error'); });
+    }
+    function toggleKey(id, curEnabled) {
+      fetch('/admin/api/keys/' + id, {
+        method:'PUT', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({enabled: !curEnabled})
+      }).then(function(r){ return r.json(); })
+        .then(function(d){ if (d.success) { showToast(curEnabled ? '已禁用' : '已启用', 'success'); loadKeys(); } else { showToast('操作失败', 'error'); } })
+        .catch(function(){ showToast('网络错误', 'error'); });
+    }
+    function deleteKey(id) {
+      if (!confirm('确定删除？')) return;
+      fetch('/admin/api/keys/' + id, {method:'DELETE', credentials:'same-origin'})
+        .then(function(r){ return r.json(); })
+        .then(function(d){ if (d.success) { showToast('已删除', 'success'); loadKeys(); } else { showToast('删除失败', 'error'); } })
+        .catch(function(){ showToast('网络错误', 'error'); });
+    }
+
     function loadRecords() {
       var params = new URLSearchParams();
       params.set('page', currentPage);
@@ -724,13 +840,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         var html = '';
         for (var i = 0; i < records.length; i++) {
           var r = records[i];
-          var sourceStr = (r.source || '').substring(0, 12);
           var statusClass = r.result_status === 'success' ? 'status-success' : 'status-error';
           var statusIcon = r.result_status === 'success' ? '✅ 成功' : '❌ 错误';
           var durationStr = (r.duration_ms != null) ? r.duration_ms + ' ms' : '-';
           html += '<tr>' +
             '<td class="dim">' + formatDate(r.timestamp) + '</td>' +
-            '<td><span class="mono" title="' + escapeHtml(r.source||'') + '">' + escapeHtml(sourceStr) + '</span></td>' +
+            '<td><span class="mono">' + escapeHtml(r.key_alias || '-') + '</span></td>' +
             '<td class="mono">' + escapeHtml(r.method||'') + '</td>' +
             '<td>' + escapeHtml(durationStr) + '</td>' +
             '<td class="' + statusClass + '">' + statusIcon + '</td>' +
@@ -780,8 +895,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         })
         .catch(function(){
           document.getElementById('tabs-container').innerHTML =
-            '<table><thead><tr><th>#</th><th>URL</th><th>标题</th><th>分组</th><th>操作</th></tr></thead>' +
-            '<tbody><tr><td colspan="5" class="empty">守护进程不可用</td></tr></tbody></table>';
+            '<table><thead><tr><th>#</th><th>URL</th><th>标题</th><th>密钥</th><th>会话</th><th>分组</th><th>操作</th></tr></thead>' +
+            '<tbody><tr><td colspan="7" class="empty">守护进程不可用</td></tr></tbody></table>';
         });
     }
 
@@ -797,37 +912,39 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       if (tabs.length === 0) {
         document.getElementById('tabs-container').innerHTML =
-          '<table><thead><tr><th>#</th><th>URL</th><th>标题</th><th>分组</th><th>操作</th></tr></thead>' +
-          '<tbody><tr><td colspan="5" class="empty">暂无打开的页面</td></tr></tbody></table>';
+          '<table><thead><tr><th>#</th><th>URL</th><th>标题</th><th>密钥</th><th>会话</th><th>分组</th><th>操作</th></tr></thead>' +
+          '<tbody><tr><td colspan="7" class="empty">暂无打开的页面</td></tr></tbody></table>';
         return;
       }
 
-      var html = '<table><thead><tr><th>#</th><th>URL</th><th>标题</th><th>分组</th><th>操作</th></tr></thead><tbody>';
+      var html = '<table><thead><tr><th>#</th><th>URL</th><th>标题</th><th>密钥</th><th>会话</th><th>分组</th><th>操作</th></tr></thead><tbody>';
       for (var i = 0; i < tabs.length; i++) {
         var t = tabs[i];
         var url = escapeHtml(t.url || '');
         var title = escapeHtml(t.title || '');
         var group = escapeHtml(t.group_title || t.group || t.groupTitle || '-');
         var index = t.index != null ? t.index : i;
-        html += '<tr>' +
+         html += '<tr>' +
           '<td class="dim">' + (index + 1) + '</td>' +
           '<td><span class="mono" title="' + url + '">' + truncate(url, 60) + '</span></td>' +
           '<td>' + truncate(title, 40) + '</td>' +
+          '<td class="dim">' + escapeHtml(t.key || '-') + '</td>' +
+          '<td class="dim">' + escapeHtml(t.session || '-') + '</td>' +
           '<td class="dim">' + group + '</td>' +
-          '<td><button class="btn btn-outline btn-sm" onclick="closeTab(' + index + ')" style="color:#e74c3c;border-color:#e74c3c;">关闭</button></td>' +
+          '<td><button class="btn btn-outline btn-sm tab-close-btn" data-target="' + escapeHtml(t.targetId || '') + '" style="color:#e74c3c;border-color:#e74c3c;">关闭</button></td>' +
           '</tr>';
       }
       html += '</tbody></table>';
       document.getElementById('tabs-container').innerHTML = html;
     }
 
-    function closeTab(index) {
+    function closeTab(targetId) {
       if (!confirm('确定要关闭此页面吗？')) return;
       fetch('/admin/api/tabs/close', {
         method:'POST',
         credentials:'same-origin',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({index: index})
+        body: JSON.stringify({targetId: targetId})
       })
         .then(function(r){ return r.json(); })
         .then(function(d){
@@ -849,10 +966,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     document.getElementById('refresh-tabs').addEventListener('click', loadTabs);
+    document.getElementById('refresh-records').addEventListener('click', function(){ currentPage=1; loadRecords(); });
+    document.addEventListener('click', function(e) {
+      var btn = e.target.closest('.tab-close-btn');
+      if (btn) { e.preventDefault(); closeTab(btn.getAttribute('data-target')); }
+      var keb = e.target.closest('.key-edit-btn');
+      if (keb) { e.preventDefault(); editKeyAlias(keb.getAttribute('data-key-id'), keb.getAttribute('data-key-alias')); }
+      var ktb = e.target.closest('.key-toggle-btn');
+      if (ktb) { e.preventDefault(); toggleKey(ktb.getAttribute('data-key-id'), ktb.getAttribute('data-key-enabled') === '1'); }
+      var kdb = e.target.closest('.key-delete-btn');
+      if (kdb) { e.preventDefault(); deleteKey(kdb.getAttribute('data-key-id')); }
+    });
 
     // ── Init ─────────────────────────────────────────────────────────────
     loadStats();
-    loadConfig();
+    loadKeys();
     loadTabs();
     loadRecords();
   </script>

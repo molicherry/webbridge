@@ -10,6 +10,8 @@ from typing import Any
 import httpx
 
 from . import call_logger
+from .call_logger import request_key_alias as _req_key_alias
+from .session_tracker import record as _track, remove as _untrack, clear_session as _clear_session
 
 _log = logging.getLogger("kimi-webbridge-mcp.tools")
 
@@ -125,8 +127,12 @@ async def navigate(url: str, new_tab: bool = True, group_title: str = "", sessio
     args: dict[str, Any] = {"url": url, "newTab": new_tab}
     if new_tab and group_title:
         args["group_title"] = group_title
-    sid = session_id or None
+    sid = session_id or f"session-{int(_time.time() * 1000)}"
     data = await _call("navigate", args, sid)
+    daemon_resp = data.get("data", {})
+    if daemon_resp.get("success"):
+        resolved_url = daemon_resp.get("url", url)
+        _track(resolved_url, sid, group_title or f"agent:{sid}", key_alias=_req_key_alias.get())
     return json.dumps(data, ensure_ascii=False)
 
 
@@ -357,7 +363,10 @@ async def close_session(session_id: str = "") -> str:
     Args:
         session_id: Session ID for tab group isolation. Auto-generated if empty.
     """
-    data = await _call("close_session", {}, session_id or None)
+    sid = session_id or None
+    data = await _call("close_session", {}, sid)
+    if sid:
+        _clear_session(sid)
     return json.dumps(data, ensure_ascii=False)
 
 

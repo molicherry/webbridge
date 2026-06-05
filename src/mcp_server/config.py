@@ -32,6 +32,11 @@ DB_PATH = os.environ.get("DB_PATH", "/home/chrome/data/call_records.db")
 CALL_RECORD_RETENTION_DAYS = int(os.environ.get("CALL_RECORD_RETENTION_DAYS", "30"))
 """Number of days to retain call records before cleanup."""
 
+# ── Chrome CDP ──────────────────────────────────────────────────────────
+
+CDP_PORT = int(os.environ.get("CDP_PORT", "9222"))
+CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
+
 # ── Admin Panel Gate ────────────────────────────────────────────────────
 
 ADMIN_ENABLED = bool(ADMIN_PASSWORD)
