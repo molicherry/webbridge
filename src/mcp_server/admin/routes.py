@@ -3,6 +3,7 @@
 All HTML is inlined. No template engine, no external CSS/JS frameworks.
 """
 
+import asyncio
 import html as _html
 import json as _json
 import logging
@@ -27,22 +28,33 @@ from .auth import (
 
 logger = logging.getLogger("kimi-webbridge-mcp.admin.routes")
 
-DAEMON_URL = os.environ.get("DAEMON_URL", "http://127.0.0.1:10086")
-_daemon_client: httpx.AsyncClient | None = None
+_CDP_TIMEOUT = 30.0
+_cdp_client: httpx.AsyncClient | None = None
 
 
-def _get_daemon() -> httpx.AsyncClient:
-    global _daemon_client
-    if _daemon_client is None:
-        _daemon_client = httpx.AsyncClient(base_url=DAEMON_URL, timeout=30.0)
-    return _daemon_client
+def _get_cdp_client() -> httpx.AsyncClient:
+    global _cdp_client
+    if _cdp_client is None:
+        _cdp_client = httpx.AsyncClient(timeout=_CDP_TIMEOUT)
+    return _cdp_client
 
 
-async def _daemon_call(action: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
-    body: dict[str, Any] = {"action": action, "args": args or {}}
-    resp = await _get_daemon().post("/command", json=body)
-    resp.raise_for_status()
-    return resp.json()
+async def _cdp_get(path: str, parse_json: bool = True) -> Any:
+    """GET from Chrome CDP with retry on transient failures."""
+    last_exc = None
+    for attempt in range(2):
+        try:
+            resp = await _get_cdp_client().get(f"{CDP_URL}{path}")
+            resp.raise_for_status()
+            return resp.json() if parse_json else resp.text
+        except Exception as e:
+            last_exc = e
+            if attempt == 0:
+                logger.warning("CDP request failed (attempt 1/2), retrying: %s", e)
+                await asyncio.sleep(1)
+            else:
+                logger.exception("CDP request failed (attempt 2/2)")
+    raise last_exc  # type: ignore[possibly-undefined]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -312,10 +324,13 @@ async def api_tabs(request: Request) -> JSONResponse:
         return JSONResponse({"error": "admin disabled"}, status_code=404)
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as cdp:
-            cdp_resp = await cdp.get(f"{CDP_URL}/json/list")
-            cdp_resp.raise_for_status()
-            targets = cdp_resp.json()
+        targets = await _cdp_get("/json/list")
+    except httpx.TimeoutException:
+        logger.exception("CDP /json/list timed out")
+        return JSONResponse({"error": "chrome CDP unavailable (timeout)"}, status_code=503)
+    except httpx.ConnectError:
+        logger.exception("CDP connection refused")
+        return JSONResponse({"error": "chrome CDP unavailable (connection refused)"}, status_code=503)
     except Exception:
         logger.exception("Error querying Chrome CDP")
         return JSONResponse({"error": "chrome CDP unavailable"}, status_code=503)
@@ -357,9 +372,7 @@ async def api_tabs_close(request: Request) -> JSONResponse:
         return JSONResponse({"error": "targetId required"}, status_code=400)
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as cdp:
-            cdp_resp = await cdp.get(f"{CDP_URL}/json/close/{target_id}")
-            cdp_resp.raise_for_status()
+        await _cdp_get(f"/json/close/{target_id}", parse_json=False)
         logger.info("Tab closed via CDP: targetId=%s", target_id[:16])
         return JSONResponse({"success": True})
     except Exception:
@@ -888,15 +901,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         .then(function(r){ return r.json(); })
         .then(function(d){
           if (d.error) {
-            container.innerHTML = '<div class="empty">守护进程不可用</div>';
+            var msg = d.error;
+            if (d.error.indexOf('timeout') !== -1) {
+              msg = 'Chrome 浏览器响应超时（可能正忙于处理请求），请稍后刷新';
+            } else if (d.error.indexOf('connection') !== -1) {
+              msg = '无法连接 Chrome 浏览器，请等待服务恢复';
+            } else if (d.error.indexOf('CDP') !== -1) {
+              msg = '浏览器 CDP 不可用（Chrome 连接异常）';
+            }
+            container.innerHTML = '<div class="empty">' + escapeHtml(msg) + '</div>';
             return;
           }
           renderTabs(d);
         })
         .catch(function(){
-          document.getElementById('tabs-container').innerHTML =
-            '<table><thead><tr><th>#</th><th>URL</th><th>标题</th><th>密钥</th><th>会话</th><th>分组</th><th>操作</th></tr></thead>' +
-            '<tbody><tr><td colspan="7" class="empty">守护进程不可用</td></tr></tbody></table>';
+          container.innerHTML = '<div class="empty">页面查询失败（管理面板服务异常）</div>';
         });
     }
 
